@@ -1,98 +1,131 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# NestJS Hexagonal Architecture
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A NestJS user API structured as hexagonal architecture (ports and adapters). The user feature is the only bounded context. Business rules live in the domain, application use cases orchestrate them, and HTTP and storage sit on the outside.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## What hexagonal architecture means here
 
-## Description
+The domain sits in the center and does not know about NestJS, HTTP, or a database. Everything else depends inward.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+The application layer talks to the outside world through **ports**: interfaces it owns. Concrete **adapters** implement those ports. Swapping storage means writing a new adapter and changing the Nest provider. Use cases and the `User` entity stay the same.
 
-## Project setup
-
-```bash
-$ pnpm install
+```
+HTTP request
+    │
+    ▼
+presentation          UserController
+    │ calls
+    ▼
+application           use cases ──depends on──▶ UserRepositoryPort
+    │ uses                                      (port, defined here)
+    ▼
+domain                User, Email, UserId
+    ▲
+    │ implements
+infrastructure        inMemoryUserRepository
 ```
 
-## Compile and run the project
+| Layer | Folder | Responsibility | Depends on |
+| --- | --- | --- | --- |
+| Domain | `src/user/domain` | Entities, value objects, and invariants | Nothing outside the domain |
+| Application | `src/user/application` | Use cases and the repository port | Domain |
+| Infrastructure | `src/user/infrastructure` | Adapters that fulfill ports | Application ports and domain types |
+| Presentation | `src/user/presentation` | HTTP controller that calls use cases | Application use cases |
 
-```bash
-# development
-$ pnpm run start
+`UserModule` is the composition root. It registers each use case and binds the `USER_REPOSITORY` token to `inMemoryUserRepository`.
 
-# watch mode
-$ pnpm run start:dev
+## Project layout
 
-# production mode
-$ pnpm run start:prod
+```
+src/
+├── main.ts
+├── app.module.ts
+└── user/
+    ├── user.module.ts
+    ├── domain/
+    │   ├── entities/user.entity.ts
+    │   └── value-objects/
+    │       ├── email.vs.ts
+    │       └── user-id.vo.ts
+    ├── application/
+    │   ├── ports/user.repository.port.ts
+    │   └── use-cases/
+    │       ├── create-user.use-case.ts
+    │       ├── update-user.use-case.ts
+    │       ├── delete-user.use-case.ts
+    │       ├── get-user-use.case-by-id.ts
+    │       ├── get-user-by-email.use-case.ts
+    │       └── get-all-users.use-case.ts
+    ├── infrastructure/
+    │   └── adapters/in-memory-user.repository.ts
+    └── presentation/
+        └── user.controller.ts
 ```
 
-## Run tests
+## Domain
 
-```bash
-# unit tests
-$ pnpm run test
+`User` is created through `User.create`. That factory checks the name (at least two characters) and wraps the email in an `Email` value object. `Email` rejects values that do not contain `@`. `UserId` generates a UUID when none is supplied.
 
-# e2e tests
-$ pnpm run test:e2e
+Behavior stays on the entity: `updateName`, `updateEmail`, and `getAccountAge`. Callers read state through getters. There is no ORM model and no HTTP type in this folder.
 
-# test coverage
-$ pnpm run test:cov
+## Application
+
+Each use case is one class with an `execute` method. They depend on `UserRepositoryPort`, injected with the `USER_REPOSITORY` symbol, not on the in-memory class.
+
+The port declares what persistence must do:
+
+- `save`
+- `findById`
+- `findByEmail`
+- `findAll`
+- `delete`
+
+`CreateUserUseCase` is the clearest example of the rule. It asks the port whether the email already exists, builds a `User` through the domain factory, then saves through the port. Duplicate-email rejection and name validation do not live in the controller or the repository.
+
+## Infrastructure
+
+`inMemoryUserRepository` implements `UserRepositoryPort` and stores users in a `Map`. Data disappears when the process stops. A Postgres or Mongo adapter would implement the same interface and be swapped in `UserModule`:
+
+```ts
+{
+  provide: USER_REPOSITORY,
+  useClass: inMemoryUserRepository,
+}
 ```
 
-## Deployment
+## Presentation
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+`UserController` is the driving adapter. It accepts HTTP, calls a use case, and maps a `User` to a response (`id`, `name`, `email`, timestamps, `accountAge`). A missing user becomes a `404`.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+| Method | Path | Use case |
+| --- | --- | --- |
+| `POST` | `/users` | `CreateUserUseCase` |
+| `GET` | `/users` | `GetAllUsersUseCase` |
+| `GET` | `/users/:id` | `GetUserByIdUseCase` |
+| `GET` | `/users/by-email/:email` | `GetUserByEmailUseCase` |
+| `PATCH` | `/users/id` | `UpdateUserUseCase` |
+| `DELETE` | `/users/:id` | `DeleteUserUseCase` |
+
+The app listens on `PORT`, or `3000` when that variable is unset.
+
+## Create-user flow
+
+1. `POST /users` hits `UserController.createUser`.
+2. The controller calls `CreateUserUseCase.execute`.
+3. The use case loads any existing user by email through `UserRepositoryPort`.
+4. `User.create` validates the name and email and assigns an id.
+5. The use case saves through the port. Nest has wired that port to `inMemoryUserRepository`.
+6. The controller maps the entity to JSON.
+
+## Run
 
 ```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
+pnpm install
+pnpm run start:dev
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+```bash
+pnpm run start        # one-shot
+pnpm run start:prod   # node dist/main, after pnpm run build
+pnpm run test
+pnpm run test:e2e
+```
